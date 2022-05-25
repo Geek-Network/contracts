@@ -11,16 +11,19 @@ contract Staking is ReentrancyGuard {
     using Math for uint256;
 
     // The STAKED TOKEN
-    address public immutable STAKED_TOKEN;
+    address public STAKED_TOKEN;
+
     // The REWARD TOKEN
-    address public immutable REWARD_TOKEN;
+    address[] public REWARD_TOKENS;
     // The block when stake starts
     uint256 public immutable START_TIME;
 
     uint256 public immutable PERIOD; // unit in day
-    uint256 public immutable TOTAL; // total amount staking
+    uint256 public SUPPLY; // total amount staking
     uint256 public immutable QUOTA; // max amount staking
     uint256 public immutable LIMIT; // limit each user stake
+
+    uint256 private _supply;
 
     // epoch era
 
@@ -33,7 +36,8 @@ contract Staking is ReentrancyGuard {
 
     bool public immutable LOCKED; // if true, you can't withdraw your money before the deadline
 
-    event Staked(address indexed user, uint256 amount, uint256 timestamp);
+    event Staked(address indexed user, uint256 amount);
+
     /**
      * @notice
      * A stake struct is used to represent the way we store stakes,
@@ -47,10 +51,28 @@ contract Staking is ReentrancyGuard {
         uint256 claimable;
     }
 
-    // user addr -> pool id -> UserSaving[]
-    // mapping(address => mapping(uint256 => Stake[])) public stakes;
+    struct Reward {
+        uint256 rate; // reward per token staking
+        uint256 period;
+        uint256 start;
+        uint256 end;
+    }
 
+    // user user -> Stake[]
     mapping(address => Stake[]) public stakes;
+
+    // user reward Token -> Reward[]
+    mapping(address => Reward[]) public rewards;
+
+    mapping(address => uint256) private _balances;
+
+    function totalSupply() external view returns (uint256) {
+        return _supply;
+    }
+
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
 
     /**
      * @notice
@@ -75,17 +97,8 @@ contract Staking is ReentrancyGuard {
     }
 
     // View function to see current periods.
-    function getPeriodsSinceStart(uint256 _since) public view returns (uint256 periods) {
-        uint256 _timestamp = block.timestamp;
-        uint256 _start = START_TIME;
-        uint256 _period = PERIOD;
-
-        if (_timestamp <= _start) return 0;
-        uint256 blocksSinceStart = _timestamp.sub(_start);
-        periods = (blocksSinceStart / _period).add(1);
-        if (blocksSinceStart % _period == 0) {
-            periods = periods - 1;
-        }
+    function getPeriodsSince(uint256 _since) public view returns (uint256) {
+        return (block.timestamp - _since) / PERIOD;
     }
 
     /**
@@ -95,20 +108,16 @@ contract Staking is ReentrancyGuard {
     function stake(uint256 _amount) external nonReentrant {
         require(_amount > 0, 'INVALID_ZERO_AMOUNT');
 
+        _supply = _supply.add(_amount);
+        _balances[msg.sender] = _balances[msg.sender].add(_amount);
+
         Stake[] storage _stakes = stakes[msg.sender];
-
-        uint256 sum = getTotalStaked(_stakes);
-
-        require(TOTAL <= QUOTA && sum <= LIMIT, 'NO MORE SAVING AVAIABLE');
 
         Helper.safeTransferFrom(STAKED_TOKEN, msg.sender, address(this), _amount);
 
-        // block.timestamp = timestamp of the current block in seconds since the epoch
-        uint256 _timestamp = block.timestamp;
+        _stakes.push(Stake({amount: _amount, since: block.timestamp, claimable: 0}));
 
-        _stakes.push(Stake({amount: _amount, since: _timestamp, claimable: 0}));
-
-        emit Staked(msg.sender, _amount, _timestamp);
+        emit Staked(msg.sender, _amount);
     }
 
     function unstake(uint256 amount) external nonReentrant {}
@@ -127,7 +136,9 @@ contract Staking is ReentrancyGuard {
         uint256 claimable = 0;
         Stake[] storage _stakes = stakes[msg.sender];
         for (uint256 i = 0; i < _stakes.length; i++) {
-            uint256 reward = calculateStakeReward(_stakes[i]);
+            uint256 periods = (block.timestamp - _stakes[i].since) / PERIOD;
+            uint256 reward = (periods * _stakes[i].amount) / REWARD_PER_PERIOD;
+            _stakes[i].since = _stakes[i].since.add(periods.mul(PERIOD));
             claimable = claimable.add(reward);
         }
         // if (claimable > 0) {
